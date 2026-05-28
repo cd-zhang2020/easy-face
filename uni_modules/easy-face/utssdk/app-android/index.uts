@@ -1,0 +1,1016 @@
+import {
+	AddFaceBySDKCamera, FaceVerify, LivenessVerify,
+	GetFaceFeature, InsertFaceFeature, AddFaceBySDKImage,
+	ToastMessage, DeleteFaceFeature, SwitchCamera, ResultJSON,
+	VerifyFaceRealtime, StartFaceVerifyActivity, StartCameraXFaceVerifyActivity
+} from '../interface.uts'
+
+import Activity from 'android.app.Activity'
+import Intent from 'android.content.Intent'
+import Context from 'android.content.Context'
+import Bitmap from 'android.graphics.Bitmap'
+import BitmapFactory from 'android.graphics.BitmapFactory'
+import RectF from 'android.graphics.RectF'
+import PointF from 'android.graphics.PointF'
+import Handler from 'android.os.Handler'
+import Looper from 'android.os.Looper'
+import Base64 from 'android.util.Base64'
+import Toast from 'android.widget.Toast'
+import Matrix from 'android.graphics.Matrix'
+import ExifInterface from 'androidx.exifinterface.media.ExifInterface'
+import File from 'java.io.File'
+import ByteArrayOutputStream from 'java.io.ByteArrayOutputStream'
+import Thread from 'java.lang.Thread'
+import Runnable from 'java.lang.Runnable'
+import MMKV from 'com.tencent.mmkv.MMKV'
+
+
+
+import FaceDetectorHelper from 'uts.sdk.modules.easyFace.face.FaceDetectorHelper'
+import FaceNetHelper from 'uts.sdk.modules.easyFace.face.FaceNetHelper'
+import LivenessHelper from 'uts.sdk.modules.easyFace.face.LivenessHelper'
+import FaceRepository from 'uts.sdk.modules.easyFace.face.FaceRepository'
+
+
+// --- 请求码定义 ---
+const REQ_CODE_ADD_FACE = 1001
+const REQ_CODE_VERIFY = 1002
+const REQ_CODE_LIVENESS = 1003
+const REQ_CODE_FACE_VERIFY_ACT = 2001
+const REQ_CODE_CAMERAX_VERIFY = 2002
+const OP_ADD_FACE : Int = 1
+const OP_VERIFY : Int = 2
+const OP_LIVENESS : Int = 3
+
+// --- 状态缓存 ---
+let currentCallback : ((result : ResultJSON) => void) | null = null
+let currentFaceID : string = ""
+let currentOpType : Int = 0 as Int
+let currentThreshold : number = 0.6
+let currentNeedLiveness : boolean = false
+let cameraImageUri : string = ""
+
+// Activity 启动回调
+let faceVerifyActCallback : ((result : ResultJSON) => void) | null = null
+let cameraXVerifyActCallback : ((result : ResultJSON) => void) | null = null
+
+// --- 工具类实例 (延迟初始化) ---
+let faceDetectorInstance : FaceDetectorHelper | null = null
+let faceNetInstance : FaceNetHelper | null = null
+let livenessInstance : LivenessHelper | null = null
+let faceRepoInstance : FaceRepository | null = null
+
+// ==========================================
+// 后台线程 Runnable 类 (避免 ML Kit/TFLite 在主线程报错)
+// ==========================================
+
+/**
+ * 拍照回调后台处理 Runnable
+ */
+class FaceProcessRunnable extends Runnable {
+	private photoBitmap : Bitmap
+	private defResult : ResultJSON
+
+	constructor(photoBitmap : Bitmap, defResult : ResultJSON) {
+		super()
+		this.photoBitmap = photoBitmap
+		this.defResult = defResult
+	}
+
+	override run() : void {
+		try {
+			ensureInit()
+			processPhotoBitmap(this.photoBitmap)
+		} catch (e : any) {
+			this.defResult.code = 9019999
+			this.defResult.msg = "处理异常: " + e.message
+			currentCallback!(this.defResult)
+			currentCallback = null
+			currentFaceID = ""
+			currentOpType = 0 as Int
+		}
+	}
+}
+
+/**
+ * 图片录入后台处理 Runnable
+ */
+class ImageProcessRunnable extends Runnable {
+	private base64FaceImage : string
+	private faceID : string
+	private callback : (result : ResultJSON) => void
+
+	constructor(base64FaceImage : string, faceID : string, callback : (result : ResultJSON) => void) {
+		super()
+		this.base64FaceImage = base64FaceImage
+		this.faceID = faceID
+		this.callback = callback
+	}
+
+	override run() : void {
+		try {
+			ensureInit()
+			const imgBytes = Base64.decode(this.base64FaceImage, Base64.NO_WRAP)
+			const bitmap = BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size)
+			if (bitmap == null) {
+				const res : ResultJSON = { code: 9010006, msg: "图片解码失败", faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+			const result = processImageBitmap(bitmap, this.faceID)
+			bitmap.recycle()
+			this.callback(result)
+		} catch (e : any) {
+			console.error("EasyFace: addFaceBySDKImage error: " + e.message)
+			const res : ResultJSON = { code: 9019999, msg: "处理异常: " + e.message, faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+			this.callback(res)
+		}
+	}
+}
+
+/**
+ * 实时人脸验证后台处理 Runnable
+ * 复用 OP_VERIFY 的检测+提取+活体+对比流程，输入为 base64 图片帧
+ */
+class RealtimeVerifyRunnable extends Runnable {
+	private base64FaceImage : string
+	private faceID : string
+	private threshold : number
+	private needLiveness : boolean
+	private callback : (result : ResultJSON) => void
+
+	constructor(base64FaceImage : string, faceID : string, threshold : number, needLiveness : boolean, callback : (result : ResultJSON) => void) {
+		super()
+		this.base64FaceImage = base64FaceImage
+		this.faceID = faceID
+		this.threshold = threshold
+		this.needLiveness = needLiveness
+		this.callback = callback
+	}
+
+	override run() : void {
+		try {
+			ensureInit()
+			const imgBytes = Base64.decode(this.base64FaceImage, Base64.NO_WRAP)
+			const bitmap = BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size)
+			if (bitmap == null) {
+				const res : ResultJSON = { code: 9010006, msg: "图片解码失败", faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			// 1. 人脸检测
+			const faceMap = faceDetectorInstance!.detectBestFace(bitmap)
+			if (faceMap == null) {
+				bitmap.recycle()
+				const res : ResultJSON = { code: 5, msg: "未检测到人脸", faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			const bbox = new RectF(
+				faceMap.get("left") as Float,
+				faceMap.get("top") as Float,
+				faceMap.get("right") as Float,
+				faceMap.get("bottom") as Float
+			)
+			const leftEye = new PointF(
+				faceMap.get("leftEyeX") as Float,
+				faceMap.get("leftEyeY") as Float
+			)
+			const rightEye = new PointF(
+				faceMap.get("rightEyeX") as Float,
+				faceMap.get("rightEyeY") as Float
+			)
+
+			// 2. 特征提取
+			const embedding = faceNetInstance!.extractEmbedding(bitmap, bbox, leftEye, rightEye)
+			if (embedding == null) {
+				bitmap.recycle()
+				const res : ResultJSON = { code: 6, msg: "人脸特征提取失败", faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			var livenessScore = -1.0
+			// 3. 静默活体检测 (可选)
+			if (this.needLiveness) {
+				livenessScore = livenessInstance!.detectLiveness(bitmap, bbox)
+				if (livenessScore >= 0 && livenessScore < 0.65) {
+					bitmap.recycle()
+					const res : ResultJSON = { code: 11, msg: "静默活体检测未通过", faceID: this.faceID, similarity: 0, liveness: livenessScore, faceFeature: "", faceBase64: "" }
+					this.callback(res)
+					return
+				}
+			}
+
+			// 4. 获取已注册的特征
+			const storedEmbedding = faceRepoInstance!.getFeature(this.faceID)
+			if (storedEmbedding == null) {
+				bitmap.recycle()
+				const res : ResultJSON = { code: 6, msg: "未找到已注册的人脸特征，请先录入", faceID: this.faceID, similarity: 0, liveness: livenessScore, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			// 5. 余弦相似度对比
+			const similarity = faceRepoInstance!.cosineSimilarity(embedding, storedEmbedding)
+
+			bitmap.recycle()
+
+			const res : ResultJSON = {
+				code: similarity >= this.threshold ? 1 : 2,
+				msg: similarity >= this.threshold ? "人脸验证通过" : "人脸相似度过低，验证失败",
+				faceID: this.faceID,
+				similarity: similarity,
+				liveness: livenessScore,
+				faceFeature: "",
+				faceBase64: this.base64FaceImage
+			}
+			this.callback(res)
+		} catch (e : any) {
+			console.error("EasyFace: verifyFaceRealtime error: " + e.message)
+			const res : ResultJSON = { code: 9019999, msg: "处理异常: " + e.message, faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+			this.callback(res)
+		}
+	}
+}
+
+/**
+ * 确保工具类已初始化
+ */
+function ensureInit() : void {
+	const context = UTSAndroid.getAppContext() as Context
+
+	// 显式初始化 MMKV，防止 ContentProvider 初始化时机晚于调用
+	MMKV.initialize(context)
+	if (faceDetectorInstance == null) {
+		faceDetectorInstance = new FaceDetectorHelper()
+	}
+	if (faceNetInstance == null) {
+		faceNetInstance = new FaceNetHelper(context)
+	}
+	if (livenessInstance == null) {
+		livenessInstance = new LivenessHelper(context)
+	}
+	if (faceRepoInstance == null) {
+		faceRepoInstance = new FaceRepository(context)
+	}
+}
+
+/**
+ * 创建临时图片文件
+ */
+function createTempImageFile() : File {
+	const context = UTSAndroid.getAppContext() as Context
+	const cacheDir = context.getCacheDir()
+	const fileName = "easy_face_" + Date.now().toString() + ".jpg"
+	const file = new File(cacheDir, fileName)
+	file.createNewFile()
+	return file
+}
+
+/**
+ * 启动系统相机拍照
+ */
+function launchCamera(requestCode : Int) : boolean {
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) return false
+
+	const permissionNeed = ["android.permission.CAMERA"]
+	UTSAndroid.requestSystemPermission(activity, permissionNeed,
+		function (allRight : boolean, _ : string[]) {
+			if (!allRight) {
+				fireCallback(9010001, "相机权限未授权")
+				return
+			}
+			try {
+				const takePictureIntent = new Intent("android.media.action.IMAGE_CAPTURE")
+				const pm = (UTSAndroid.getAppContext() as Context).getPackageManager()
+				if (takePictureIntent.resolveActivity(pm) != null) {
+					activity.startActivityForResult(takePictureIntent, requestCode)
+				} else {
+					fireCallback(9010001, "未找到相机应用")
+				}
+			} catch (e : any) {
+				fireCallback(9010001, "无法启动相机: " + e.message)
+			}
+		},
+		function (_ : boolean, _ : string[]) {
+			fireCallback(9010001, "相机权限已被永久拒绝，请在设置中开启")
+		}
+	)
+	return true
+}
+
+function fireCallback(code : number, msg : string) : void {
+	const cb = currentCallback
+	if (cb != null) {
+		const res : ResultJSON = { code: code, msg: msg, faceID: currentFaceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		cb(res)
+		currentCallback = null
+		currentFaceID = ""
+		currentOpType = 0 as Int
+	}
+}
+
+/**
+ * 从 Uri 加载 Bitmap 并处理旋转
+ */
+function loadBitmapFromUri(uriStr : string) : Bitmap | null {
+	try {
+		const context = UTSAndroid.getAppContext() as Context
+		const uri = android.net.Uri.parse(uriStr)
+		const inputStream = context.getContentResolver().openInputStream(uri)
+		if (inputStream == null) return null
+
+		const bitmap = BitmapFactory.decodeStream(inputStream)
+		inputStream.close()
+
+		if (bitmap == null) return null
+
+		// 处理图片旋转
+		try {
+			const exifInterface = new ExifInterface(uriStr.replace("file://", ""))
+			const orientation = exifInterface.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+			var rotation = 0
+			switch (orientation) {
+				case ExifInterface.ORIENTATION_ROTATE_90: rotation = 90; break
+				case ExifInterface.ORIENTATION_ROTATE_180: rotation = 180; break
+				case ExifInterface.ORIENTATION_ROTATE_270: rotation = 270; break
+			}
+			if (rotation != 0) {
+				const matrix = new Matrix()
+				matrix.postRotate(rotation.toFloat())
+				const rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.getWidth(), bitmap.getHeight(), matrix, true)
+				if (rotated != bitmap) {
+					bitmap.recycle()
+				}
+				return rotated
+			}
+		} catch (e : any) {
+			// EXIF 读取失败，忽略旋转处理
+		}
+		return bitmap
+	} catch (e : any) {
+		console.error("EasyFace: Failed to load bitmap: " + e.message)
+		return null
+	}
+}
+
+/**
+ * Bitmap → Base64 字符串
+ */
+function bitmapToBase64(bitmap : Bitmap) : string {
+	const baos = new ByteArrayOutputStream()
+	bitmap.compress(Bitmap.CompressFormat.JPEG, 85, baos)
+	const bytes = baos.toByteArray()
+	baos.close()
+	return Base64.encodeToString(bytes, Base64.NO_WRAP)
+}
+
+/**
+ * 清理拍照临时文件
+ */
+function cleanTempFile() : void {
+	try {
+		const uri = android.net.Uri.parse(cameraImageUri)
+		const path = uri.getPath()
+		if (path != null) {
+			const file = new File(path)
+			if (file.exists()) {
+				file.delete()
+			}
+		}
+	} catch (e : any) {
+		// 忽略清理失败
+	}
+}
+
+/**
+ * 核心 AI 推理：拍照回调后处理
+ */
+function processPhotoBitmap(bitmap : Bitmap) : void {
+	const defResult : ResultJSON = {
+		code: 0,
+		msg: "处理中",
+		faceID: currentFaceID,
+		similarity: 0,
+		liveness: 0,
+		faceFeature: "",
+		faceBase64: ""
+	}
+
+	defResult.faceBase64 = bitmapToBase64(bitmap)
+
+	// 1. 人脸检测（使用 UTS 友好的 detectBestFace）
+	const faceMap = faceDetectorInstance!.detectBestFace(bitmap)
+	if (faceMap == null) {
+		bitmap.recycle()
+		cleanTempFile()
+		defResult.code = 5
+		defResult.msg = "未检测到人脸"
+		currentCallback!(defResult)
+		currentCallback = null
+		return
+	}
+
+	// 提取人脸框 + 关键点坐标
+	const bboxLeft = faceMap.get("left") as number
+	const bboxTop = faceMap.get("top") as number
+	const bboxRight = faceMap.get("right") as number
+	const bboxBottom = faceMap.get("bottom") as number
+	const leftEyeX = faceMap.get("leftEyeX") as number
+	const leftEyeY = faceMap.get("leftEyeY") as number
+	const rightEyeX = faceMap.get("rightEyeX") as number
+	const rightEyeY = faceMap.get("rightEyeY") as number
+
+	const bbox = new RectF(bboxLeft as Float, bboxTop as Float, bboxRight as Float, bboxBottom as Float)
+	const leftEye = new PointF(leftEyeX as Float, leftEyeY as Float)
+	const rightEye = new PointF(rightEyeX as Float, rightEyeY as Float)
+
+	// 2. 特征提取
+	const embedding = faceNetInstance!.extractEmbedding(bitmap, bbox, leftEye, rightEye)
+	if (embedding == null) {
+		bitmap.recycle()
+		cleanTempFile()
+		defResult.code = 6
+		defResult.msg = "人脸特征提取失败"
+		currentCallback!(defResult)
+		currentCallback = null
+		return
+	}
+
+	// 3. 根据操作类型分发
+	const opType = currentOpType
+	switch (opType) {
+		case OP_ADD_FACE: {
+			const saved = faceRepoInstance!.saveFeature(currentFaceID, embedding)
+			defResult.code = saved ? 1 : 9010007
+			defResult.msg = saved ? "人脸录入成功" : "存储失败"
+			defResult.faceFeature = FaceDetectorHelper.floatArrayToBase64(embedding)
+			break
+		}
+
+		case OP_VERIFY: {
+			// 3a. 静默活体检测 (可选)
+			if (currentNeedLiveness) {
+				const livenessScore = livenessInstance!.detectLiveness(bitmap, bbox)
+				if (livenessScore < 0) {
+					defResult.liveness = -1
+				} else {
+					defResult.liveness = livenessScore
+					if (livenessScore < 0.65) {
+						bitmap.recycle()
+						cleanTempFile()
+						defResult.code = 11
+						defResult.msg = "静默活体检测未通过"
+						defResult.similarity = 0
+						currentCallback!(defResult)
+						currentCallback = null
+						return
+					}
+				}
+			}
+
+			// 3b. 获取已注册的特征
+			const storedEmbedding = faceRepoInstance!.getFeature(currentFaceID)
+			if (storedEmbedding == null) {
+				bitmap.recycle()
+				cleanTempFile()
+				defResult.code = 6
+				defResult.msg = "未找到已注册的人脸特征，请先录入"
+				currentCallback!(defResult)
+				currentCallback = null
+				return
+			}
+
+			// 3c. 余弦相似度对比
+			const similarity = faceRepoInstance!.cosineSimilarity(embedding, storedEmbedding)
+			defResult.similarity = similarity
+
+			if (similarity >= currentThreshold) {
+				defResult.code = 1
+				defResult.msg = "人脸验证通过"
+			} else {
+				defResult.code = 2
+				defResult.msg = "人脸相似度过低，验证失败"
+			}
+			break
+		}
+
+		case OP_LIVENESS: {
+			const livenessScore = livenessInstance!.detectLiveness(bitmap, bbox)
+			if (livenessScore < 0) {
+				bitmap.recycle()
+				cleanTempFile()
+				defResult.code = 9010005
+				defResult.msg = "活体检测模型未加载，请将 mini_fasnet.tflite 放入 assets"
+				currentCallback!(defResult)
+				currentCallback = null
+				return
+			}
+
+			defResult.liveness = livenessScore
+			if (livenessScore >= 0.65) {
+				defResult.code = 1
+				defResult.msg = "活体检测通过"
+			} else {
+				defResult.code = 11
+				defResult.msg = "活体检测未通过"
+			}
+			break
+		}
+	}
+
+	bitmap.recycle()
+	cleanTempFile()
+	currentCallback!(defResult)
+	currentCallback = null
+	currentFaceID = ""
+	currentOpType = 0 as Int
+}
+
+// ==========================================
+// 全局 Activity Result 分发器
+// ==========================================
+UTSAndroid.onAppActivityResult((requestCode : Int, resultCode : Int, intentAct ?: Intent) => {
+	// FaceVerifyActivity (Camera2) 结果处理
+	if (requestCode == (REQ_CODE_FACE_VERIFY_ACT as Int)) {
+		const actCallback = faceVerifyActCallback
+		faceVerifyActCallback = null
+		const defResult : ResultJSON = {
+			code: 0,
+			msg: "用户取消",
+			faceID: "",
+			similarity: 0,
+			liveness: 0,
+			faceFeature: "",
+			faceBase64: ""
+		}
+		if (resultCode == -1 && intentAct != null) {
+			defResult.code = intentAct.getIntExtra("code", 0) as number
+			defResult.msg = intentAct.getStringExtra("msg") ?? "未知"
+			defResult.faceID = ""
+			defResult.similarity = 0
+			defResult.liveness = 0
+		}
+		actCallback!(defResult)
+		return
+	}
+
+	// CameraXFaceVerifyActivity (CameraX) 结果处理
+	if (requestCode == (REQ_CODE_CAMERAX_VERIFY as Int)) {
+		const actCallback = cameraXVerifyActCallback
+		cameraXVerifyActCallback = null
+		const defResult : ResultJSON = {
+			code: 0,
+			msg: "用户取消",
+			faceID: "",
+			similarity: 0,
+			liveness: 0,
+			faceFeature: "",
+			faceBase64: ""
+		}
+		if (resultCode == -1 && intentAct != null) {
+			defResult.code = intentAct.getIntExtra("code", 0) as number
+			defResult.msg = intentAct.getStringExtra("msg") ?? "未知"
+			defResult.faceID = ""
+			defResult.similarity = 0
+			defResult.liveness = 0
+		}
+		actCallback!(defResult)
+		return
+	}
+
+	if (currentCallback == null) return
+
+	const defResult : ResultJSON = {
+		code: 0,
+		msg: "用户取消/中断操作",
+		faceID: currentFaceID,
+		similarity: 0,
+		liveness: 0,
+		faceFeature: "",
+		faceBase64: ""
+	}
+
+	// 无 EXTRA_OUTPUT 模式，从 Intent data 获取缩略图
+	if (resultCode != -1 || intentAct == null || intentAct.getExtras() == null) {
+		defResult.msg = "用户取消操作"
+		currentCallback!(defResult)
+		currentCallback = null
+		currentFaceID = ""
+		currentOpType = 0 as Int
+		return
+	}
+
+	const photoBitmap = intentAct.getExtras()?.get("data") as Bitmap
+	if (photoBitmap == null) {
+		defResult.msg = "相机未返回图片"
+		currentCallback!(defResult)
+		currentCallback = null
+		currentFaceID = ""
+		currentOpType = 0 as Int
+		return
+	}
+	// 在后台线程执行 ML Kit + TFLite 推理，避免 "Must not be called on the main application thread"
+	const bgThread = new Thread(new FaceProcessRunnable(photoBitmap, defResult))
+	bgThread.start();
+});
+
+// ==========================================
+// 图片录入的 AI 推理（与拍照共用同一流程）
+// ==========================================
+function processImageBitmap(bitmap : Bitmap, faceID : string) : ResultJSON {
+	const defResult : ResultJSON = {
+		code: 0, msg: "处理中", faceID: faceID,
+		similarity: 0, liveness: 0, faceFeature: "", faceBase64: ""
+	}
+
+	const faceMap = faceDetectorInstance!.detectBestFace(bitmap)
+	if (faceMap == null) {
+		defResult.code = 5
+		defResult.msg = "未检测到人脸"
+		return defResult
+	}
+
+	const bbox = new RectF(
+		faceMap.get("left") as Float,
+		faceMap.get("top") as Float,
+		faceMap.get("right") as Float,
+		faceMap.get("bottom") as Float
+	)
+	const leftEye = new PointF(
+		faceMap.get("leftEyeX") as Float,
+		faceMap.get("leftEyeY") as Float
+	)
+	const rightEye = new PointF(
+		faceMap.get("rightEyeX") as Float,
+		faceMap.get("rightEyeY") as Float
+	)
+
+	const embedding = faceNetInstance!.extractEmbedding(bitmap, bbox, leftEye, rightEye)
+	if (embedding == null) {
+		defResult.code = 6
+		defResult.msg = "人脸特征提取失败"
+		return defResult
+	}
+
+	const saved = faceRepoInstance!.saveFeature(faceID, embedding)
+	defResult.code = saved ? 1 : 9010007
+	defResult.msg = saved ? "人脸录入成功" : "存储失败"
+	defResult.faceFeature = FaceDetectorHelper.floatArrayToBase64(embedding)
+	return defResult
+}
+
+// ==========================================
+// 暴露给前端的 API 实现
+// ==========================================
+
+/**
+ * 通过摄像头录入人脸
+ */
+export const addFaceBySDKCamera : AddFaceBySDKCamera = function (
+	faceID : string,
+	callback : (result : ResultJSON) => void
+) {
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	currentCallback = callback
+	currentFaceID = faceID
+	currentOpType = OP_ADD_FACE
+	const launched = launchCamera(REQ_CODE_ADD_FACE as Int)
+	if (!launched) {
+		const res : ResultJSON = { code: 9010001, msg: "无法启动相机", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		currentCallback = null
+		currentFaceID = ""
+	}
+}
+
+/**
+ * 从图片提取特征并录入
+ */
+export const addFaceBySDKImage : AddFaceBySDKImage = function (
+	faceID : string,
+	base64FaceImage : string,
+	callback : (result : ResultJSON) => void
+) {
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (base64FaceImage == null || base64FaceImage.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "base64FaceImage 不能为空", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	// 在后台线程执行 ML Kit + TFLite 推理，避免 "Must not be called on the main application thread"
+	const bgThread = new Thread(new ImageProcessRunnable(base64FaceImage, faceID, callback))
+	bgThread.start();
+}
+
+/**
+ * 校验是否当前用户
+ */
+export const faceVerify : FaceVerify = function (
+	faceID : string,
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	currentCallback = callback
+	currentFaceID = faceID
+	currentOpType = OP_VERIFY
+	currentThreshold = threshold
+	currentNeedLiveness = needLiveness
+
+	const launched = launchCamera(REQ_CODE_VERIFY as Int)
+	if (!launched) {
+		const res : ResultJSON = { code: 9010001, msg: "无法启动相机", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		currentCallback = null
+		currentFaceID = ""
+	}
+}
+
+/**
+ * 「静默活体检测」仅检测是否为真人
+ */
+export const livenessVerify : LivenessVerify = function (
+	callback : (result : ResultJSON) => void
+) {
+	currentCallback = callback
+	currentFaceID = ""
+	currentOpType = OP_LIVENESS
+
+	const launched = launchCamera(REQ_CODE_LIVENESS as Int)
+	if (!launched) {
+		const res : ResultJSON = { code: 9010001, msg: "无法启动相机", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		currentCallback = null
+	}
+}
+
+/**
+ * 检测人脸特征是否存在
+ */
+export const getFaceFeature : GetFaceFeature = function (
+	faceID : string,
+	callback : (result : ResultJSON) => void
+) {
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	UTSAndroid.getUniActivity()?.runOnUiThread(() => {
+		try {
+			ensureInit()
+			const exists = faceRepoInstance!.isFeatureExist(faceID)
+			const embedding = faceRepoInstance!.getFeature(faceID)
+			var featureStr = ""
+			if (embedding != null) {
+				featureStr = FaceDetectorHelper.floatArrayToBase64(embedding)
+			}
+			const res : ResultJSON = {
+				code: exists ? 1 : 6,
+				msg: exists ? "人脸特征存在" : "人脸特征不存在",
+				faceID: faceID,
+				similarity: 0,
+				liveness: 0,
+				faceFeature: featureStr,
+				faceBase64: ""
+			}
+			callback(res)
+		} catch (e : any) {
+			const res : ResultJSON = { code: 9019999, msg: "查询异常: " + e.message, faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+			callback(res)
+		}
+	});
+}
+
+/**
+ * 同步人脸特征值到 SDK
+ */
+export const insertFaceFeature : InsertFaceFeature = function (
+	faceID : string,
+	faceFeature : string,
+	callback : (result : ResultJSON) => void
+) {
+	ensureInit()
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (faceFeature == null || faceFeature.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceFeature 不能为空", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	UTSAndroid.getUniActivity()?.runOnUiThread(() => {
+		try {
+			ensureInit()
+			const embedding = FaceDetectorHelper.base64ToFloatArray(faceFeature)
+
+			const embeddingSize = faceNetInstance!.getEmbeddingSize()
+			if (embedding.size != embeddingSize) {
+				const res : ResultJSON = { code: 9010009, msg: "faceFeature 维度不正确，期望 " + embeddingSize.toString(), faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				callback(res)
+				return
+			}
+
+			const saved = faceRepoInstance!.saveFeature(faceID, embedding)
+			const res : ResultJSON = {
+				code: saved ? 1 : 9010007,
+				msg: saved ? "人脸特征同步成功" : "存储失败",
+				faceID: faceID,
+				similarity: 0,
+				liveness: 0,
+				faceFeature: faceFeature,
+				faceBase64: ""
+			}
+			callback(res)
+		} catch (e : any) {
+			const res : ResultJSON = { code: 9019999, msg: "同步异常: " + e.message, faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+			callback(res)
+		}
+	});
+}
+
+/**
+ * 删除人脸特征
+ */
+export const deleteFaceFeature : DeleteFaceFeature = function (faceID : string) {
+	if (faceID == null || faceID.length == 0) return
+	UTSAndroid.getUniActivity()?.runOnUiThread(() => {
+		try {
+			ensureInit()
+			faceRepoInstance!.deleteFeature(faceID)
+		} catch (e : any) {
+			console.error("EasyFace: deleteFaceFeature error: " + e.message)
+		}
+	});
+}
+
+/**
+ * Toast 消息提示
+ */
+export const toastMessage : ToastMessage = function (message : string) {
+	UTSAndroid.getUniActivity()?.runOnUiThread(() => {
+		try {
+			Toast.makeText(UTSAndroid.getAppContext() as Context, message, Toast.LENGTH_SHORT).show()
+		} catch (e : any) {
+			console.log("EasyFace Toast: " + message)
+		}
+	});
+}
+
+/**
+ * 实时人脸验证：传入 base64 图片帧进行 1:1 对比，不保存特征
+ * 用于实时摄像头流不停对比场景
+ */
+export const verifyFaceRealtime : VerifyFaceRealtime = function (
+	faceID : string,
+	base64Image : string,
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (base64Image == null || base64Image.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "base64Image 不能为空", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	// 在后台线程执行 ML Kit + TFLite 推理，避免 "Must not be called on the main application thread"
+	const bgThread = new Thread(new RealtimeVerifyRunnable(base64Image, faceID, threshold, needLiveness, callback))
+	bgThread.start();
+}
+
+/**
+ * 切换摄像头
+ * cameraID: 0=后置 1=前置
+ */
+export const switchCamera : SwitchCamera = function (cameraID : number) {
+	console.log("EasyFace: switchCamera(" + cameraID.toString() + ") called. System camera mode - no action.")
+}
+
+/**
+ * 启动原生人脸验证 Activity（全屏，Camera2 + 自定义 Canvas UI）
+ * 
+ * @param faceID 用户ID
+ * @param threshold 相似度阈值 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调 (code: 1=通过, 0=取消, 其他=失败)
+ */
+export const startFaceVerifyActivity : StartFaceVerifyActivity = function (
+	faceID : string,
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	ensureInit()
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	faceVerifyActCallback = callback
+
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) {
+		const res : ResultJSON = { code: 9010001, msg: "无法获取 Activity", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		faceVerifyActCallback = null
+		return
+	}
+
+	const intent = new Intent()
+	intent.setClassName(activity, "uts.sdk.modules.easyFace.face.FaceVerifyActivity")
+	intent.putExtra("faceID", faceID)
+	intent.putExtra("threshold", threshold)
+	intent.putExtra("needLiveness", needLiveness)
+	activity.startActivityForResult(intent, REQ_CODE_FACE_VERIFY_ACT as Int)
+}
+
+/**
+ * 启动 CameraX 原生人脸验证 Activity（全屏，CameraX + 精美动画 UI）
+ * 
+ * @param faceID 用户ID
+ * @param threshold 相似度阈值 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调 (code: 1=通过, 0=取消, 其他=失败)
+ */
+export const startCameraXFaceVerifyActivity : StartCameraXFaceVerifyActivity = function (
+	faceID : string,
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	ensureInit()
+	if (faceID == null || faceID.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "faceID 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	cameraXVerifyActCallback = callback
+
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) {
+		const res : ResultJSON = { code: 9010001, msg: "无法获取 Activity", faceID: faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		cameraXVerifyActCallback = null
+		return
+	}
+
+	const intent = new Intent()
+	intent.setClassName(activity, "uts.sdk.modules.easyFace.face.CameraXFaceVerifyActivity")
+	intent.putExtra("faceID", faceID)
+	intent.putExtra("threshold", threshold)
+	intent.putExtra("needLiveness", needLiveness)
+	activity.startActivityForResult(intent, REQ_CODE_CAMERAX_VERIFY as Int)
+}

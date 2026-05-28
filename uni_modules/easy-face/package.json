@@ -1,0 +1,109 @@
+{
+	"id": "easy-face",
+	"displayName": "easy-face 人脸识别+活体检测",
+	"version": "1.0.0",
+	"description": "人脸识别、人脸对比、静默活体检测离线插件（仅Android）。基于 ML Kit 人脸检测 + MobileFaceNet 特征提取 + MiniFASNet 活体检测，完全离线运行，无需网络，不收集人脸数据。",
+	"keywords": [
+		"人脸识别",
+		"人脸对比",
+		"活体检测",
+		"静默活体",
+		"离线",
+		"Android"
+	],
+	"repository": "",
+	"engines": {
+		"HBuilderX": "^4.0",
+		"uni-app": "^3.1.0",
+		"uni-app-x": "^3.1.0"
+	},
+	"dcloudext": {
+		"type": "uts",
+		"sale": {
+			"regular": {
+				"price": "0.00"
+			},
+			"sourcecode": {
+				"price": "0.00"
+			}
+		},
+		"contact": {
+			"qq": ""
+		},
+		"declaration": {
+			"ads": "无",
+			"data": "插件完全离线运行，无需网络，不收集人脸数据。所有AI推理在设备端完成。",
+			"permissions": "相机"
+		},
+		"npmurl": "",
+		"darkmode": "-",
+		"i18n": "-",
+		"widescreen": "-"
+	},
+	"uni_modules": {
+		"dependencies": [],
+		"encrypt": [],
+		"platforms": {
+			"cloud": {
+				"tcb": "-",
+				"aliyun": "-",
+				"alipay": "-"
+			},
+			"client": {
+				"uni-app": {
+					"vue": {
+						"vue2": "-",
+						"vue3": "√"
+					},
+					"web": {
+						"safari": "-",
+						"chrome": "-"
+					},
+					"app": {
+						"vue": "√",
+						"nvue": "√",
+						"android": {
+							"extVersion": "1.0.0",
+							"minVersion": "21"
+						},
+						"ios": "-",
+						"harmony": "-"
+					},
+					"mp": {
+						"weixin": "-",
+						"alipay": "-",
+						"toutiao": "-",
+						"baidu": "-",
+						"kuaishou": "-",
+						"jd": "-",
+						"harmony": "-",
+						"qq": "-",
+						"lark": "-",
+						"xhs": "-"
+					},
+					"quickapp": {
+						"huawei": "-",
+						"union": "-"
+					}
+				},
+				"uni-app-x": {
+					"web": {
+						"safari": "-",
+						"chrome": "-"
+					},
+					"app": {
+						"android": {
+							"extVersion": "1.0.0",
+							"minVersion": "21"
+						},
+						"ios": "-",
+						"harmony": "-"
+					},
+					"mp": {
+						"weixin": "-"
+					}
+				}
+			}
+		}
+	}
+}

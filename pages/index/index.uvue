@@ -1,0 +1,706 @@
+<template>
+	<scroll-view class="container" scroll-y="true">
+		<!-- 头部 -->
+		<view class="header">
+			<image class="logo" src="/static/logo.png"></image>
+			<text class="title">人脸识别 Demo</text>
+			<text class="subtitle">离线人脸录入 · 1:1 验证 · 静默活体</text>
+		</view>
+
+		<!-- 配置区 -->
+		<view class="section">
+			<text class="section-title">基础配置</text>
+
+			<view class="form-item">
+				<text class="label">用户 ID (faceID)</text>
+				<input
+					class="input"
+					v-model="faceID"
+					placeholder="请输入用户唯一标识"
+				/>
+			</view>
+
+			<view class="form-item">
+				<view class="label-row">
+					<text class="label">相似度阈值</text>
+					<text class="label-value">{{threshold.toFixed(2)}}</text>
+				</view>
+				<slider
+					class="slider"
+					:value="threshold"
+					@change="onThresholdChange"
+					:min="0.5"
+					:max="0.95"
+					:step="0.01"
+				/>
+				<view class="slider-range">
+					<text class="range-text">0.50</text>
+					<text class="range-text">0.95</text>
+				</view>
+			</view>
+
+			<view class="form-item row">
+				<text class="label">启用静默活体检测</text>
+				<switch :checked="needLiveness" @change="onLivenessChange" />
+			</view>
+		</view>
+
+		<!-- 功能操作区 -->
+		<view class="section">
+			<text class="section-title">人脸录入</text>
+
+			<button class="btn btn-primary" @tap="onAddFaceByCamera">
+				📷 摄像头拍照录入
+			</button>
+			<button class="btn btn-outline" @tap="onPickImageAndAddFace">
+				🖼️ 从相册图片录入
+			</button>
+		</view>
+
+		<view class="section">
+			<text class="section-title">人脸验证</text>
+
+			<button class="btn btn-primary" @tap="onFaceVerify">
+				🔍 1:1 人脸验证
+			</button>
+			<button class="btn btn-accent" @tap="onStartFaceVerifyActivity">
+				🎯 原生全屏验证 (Camera2)
+			</button>
+			<button class="btn btn-accent" @tap="onStartCameraXFaceVerifyActivity">
+				✨ 原生全屏验证 (CameraX 动画增强)
+			</button>
+			<button class="btn btn-outline" @tap="onLivenessVerify">
+				👁️ 纯静默活体检测
+			</button>
+		</view>
+
+		<view class="section">
+			<text class="section-title">人脸特征管理</text>
+
+			<button class="btn btn-outline" @tap="onGetFaceFeature">
+				📋 查询人脸特征
+			</button>
+			<button class="btn btn-outline" @tap="onInsertFaceFeature">
+				📥 同步特征值到本地
+			</button>
+			<button class="btn btn-danger" @tap="onDeleteFaceFeature">
+				🗑️ 删除人脸特征
+			</button>
+		</view>
+
+		<!-- 结果展示区 -->
+		<view class="section" v-if="resultVisible">
+			<view class="result-header">
+				<text class="section-title">执行结果</text>
+				<text class="clear-btn" @tap="clearResult">清除</text>
+			</view>
+
+			<view class="result-card" :class="resultCardClass">
+				<view class="result-item">
+					<text class="result-label">状态码</text>
+					<text class="result-value">{{lastResult.code}}</text>
+				</view>
+				<view class="result-item">
+					<text class="result-label">消息</text>
+					<text class="result-value">{{lastResult.msg}}</text>
+				</view>
+				<view class="result-item" v-if="lastResult.faceID != ''">
+					<text class="result-label">用户 ID</text>
+					<text class="result-value">{{lastResult.faceID}}</text>
+				</view>
+				<view class="result-item" v-if="lastResult.similarity > 0">
+					<text class="result-label">相似度</text>
+					<text class="result-value highlight">{{(lastResult.similarity * 100).toFixed(2)}}%</text>
+				</view>
+				<view class="result-item" v-if="lastResult.liveness >= 0">
+					<text class="result-label">活体分</text>
+					<text class="result-value" :class="livenessClass">{{(lastResult.liveness * 100).toFixed(2)}}%</text>
+				</view>
+				<view class="result-item" v-if="lastResult.faceFeature != ''">
+					<text class="result-label">特征值</text>
+					<text class="result-value feature-text">{{formatFeatureText(lastResult.faceFeature)}}</text>
+				</view>
+			</view>
+
+			<!-- 人脸图预览 -->
+			<view v-if="lastResult.faceBase64 != ''" class="face-preview">
+				<text class="preview-label">人脸截图</text>
+				<image
+					class="face-image"
+					:src="'data:image/jpeg;base64,' + lastResult.faceBase64"
+					mode="aspectFit"
+				/>
+			</view>
+		</view>
+
+		<!-- 底部间距 -->
+		<view class="bottom-spacer"></view>
+	</scroll-view>
+</template>
+
+<script setup lang="uts">
+import {
+	addFaceBySDKCamera,
+	addFaceBySDKImage,
+	faceVerify,
+	livenessVerify,
+	getFaceFeature,
+	insertFaceFeature,
+	deleteFaceFeature,
+	startFaceVerifyActivity,
+	startCameraXFaceVerifyActivity,
+	toastMessage,
+	ResultJSON,
+} from '@/uni_modules/easy-face'
+
+// ==========================================
+// 响应式状态
+// ==========================================
+const faceID = ref<string>('')
+const threshold = ref<number>(0.60)
+const needLiveness = ref<boolean>(true)
+const resultVisible = ref<boolean>(false)
+const isProcessing = ref<boolean>(false)
+
+const lastResult = ref<ResultJSON>({
+	code: 0,
+	msg: '',
+	faceID: '',
+	similarity: 0,
+	liveness: -1,
+	faceFeature: '',
+	faceBase64: '',
+})
+
+// ==========================================
+// 计算属性
+// ==========================================
+const resultCardClass = computed<string>((): string => {
+	const code = lastResult.value.code
+	if (code == 1) return 'result-success'
+	if (code == 0) return 'result-cancel'
+	return 'result-fail'
+})
+
+const livenessClass = computed<string>((): string => {
+	const score = lastResult.value.liveness
+	if (score < 0) return ''
+	if (score >= 0.65) return 'highlight'
+	return 'danger-text'
+})
+
+// ==========================================
+// 工具方法
+// ==========================================
+function formatFeatureText(feature: string): string {
+	if (feature.length <= 40) return feature
+	return feature.substring(0, 20) + '...' + feature.substring(feature.length - 20)
+}
+
+function showResult(result: ResultJSON): void {
+	lastResult.value = result
+	resultVisible.value = true
+	isProcessing.value = false
+}
+
+function clearResult(): void {
+	lastResult.value = {
+		code: 0,
+		msg: '',
+		faceID: '',
+		similarity: 0,
+		liveness: -1,
+		faceFeature: '',
+		faceBase64: '',
+	} as ResultJSON
+	resultVisible.value = false
+}
+
+function onThresholdChange(e : SliderChangeEvent): void {
+	threshold.value = (e.detail.value as number)
+}
+
+function onLivenessChange(e : SwitchChangeEvent): void {
+	needLiveness.value = (e.detail.value as boolean)
+}
+
+function checkFaceID(): boolean {
+	if (faceID.value.trim().length == 0) {
+		toastMessage('请先输入用户 ID')
+		return false
+	}
+	return true
+}
+
+// ==========================================
+// 人脸录入
+// ==========================================
+function onAddFaceByCamera(): void {
+	if (!checkFaceID()) return
+
+	isProcessing.value = true
+	toastMessage('正在打开相机...')
+
+	addFaceBySDKCamera(faceID.value.trim(), (result: ResultJSON) => {
+		if (result.code != 0) {
+			toastMessage(result.msg)
+		}
+		showResult(result)
+	})
+}
+
+function onPickImageAndAddFace(): void {
+	if (!checkFaceID()) return
+
+	// uni-app x 选择图片并转 base64
+	uni.chooseImage({
+		count: 1,
+		sizeType: ['compressed'],
+		sourceType: ['album', 'camera'],
+		success: (res) => {
+			const paths = res.tempFilePaths as string[]
+			if (paths == null || paths.length == 0) {
+				toastMessage('未选择图片')
+				return
+			}
+			const tempFilePath = paths[0]
+
+			// 读取图片文件并转为 base64
+			const fs = uni.getFileSystemManager()
+			const fileData = fs.readFileSync(tempFilePath, 'base64') as string
+			if (fileData == '' || fileData == null) {
+				toastMessage('读取图片失败')
+				return
+			}
+
+			isProcessing.value = true
+			toastMessage('正在提取人脸特征...')
+
+			addFaceBySDKImage(faceID.value.trim(), fileData, (result: ResultJSON) => {
+				if (result.code != 0) {
+					toastMessage(result.msg)
+				}
+				showResult(result)
+			})
+		},
+		fail: () => {
+			toastMessage('选择图片失败')
+		},
+	})
+}
+
+// ==========================================
+// 人脸验证
+// ==========================================
+function onFaceVerify(): void {
+	if (!checkFaceID()) return
+
+	isProcessing.value = true
+	toastMessage('正在打开相机进行验证...')
+
+	faceVerify(
+		faceID.value.trim(),
+		threshold.value,
+		needLiveness.value,
+		(result: ResultJSON) => {
+			if (result.code != 0) {
+				toastMessage(result.msg)
+			}
+			showResult(result)
+		},
+	)
+}
+
+function onStartFaceVerifyActivity(): void {
+	if (!checkFaceID()) return
+	isProcessing.value = true
+	toastMessage('正在启动原生全屏验证...')
+
+	startFaceVerifyActivity(
+		faceID.value.trim(),
+		threshold.value,
+		needLiveness.value,
+		(result: ResultJSON) => {
+			if (result.code != 0) {
+				toastMessage(result.msg)
+			}
+			showResult(result)
+		},
+	)
+}
+
+function onStartCameraXFaceVerifyActivity(): void {
+	if (!checkFaceID()) return
+
+	isProcessing.value = true
+	toastMessage('正在启动 CameraX 全屏验证...')
+
+	startCameraXFaceVerifyActivity(
+		faceID.value.trim(),
+		threshold.value,
+		needLiveness.value,
+		(result: ResultJSON) => {
+			if (result.code != 0) {
+				toastMessage(result.msg)
+			}
+			showResult(result)
+		},
+	)
+}
+
+function onLivenessVerify(): void {
+	isProcessing.value = true
+	toastMessage('正在打开相机进行活体检测...')
+
+	livenessVerify((result: ResultJSON) => {
+		if (result.code != 0) {
+			toastMessage(result.msg)
+		}
+		showResult(result)
+	})
+}
+
+// ==========================================
+// 人脸特征管理
+// ==========================================
+function onGetFaceFeature(): void {
+	if (!checkFaceID()) return
+
+	isProcessing.value = true
+	toastMessage('正在查询人脸特征...')
+
+	getFaceFeature(faceID.value.trim(), (result: ResultJSON) => {
+		if (result.code == 1) {
+			toastMessage('人脸特征已存在')
+		} else {
+			toastMessage(result.msg)
+		}
+		showResult(result)
+	})
+}
+
+function onInsertFaceFeature(): void {
+	if (!checkFaceID()) return
+
+	const featureStr = lastResult.value.faceFeature
+	if (featureStr == '' || featureStr == null) {
+		toastMessage('请先录入或查询获取特征值')
+		return
+	}
+
+	isProcessing.value = true
+	toastMessage('正在同步特征值...')
+
+	insertFaceFeature(
+		faceID.value.trim(),
+		featureStr,
+		(result: ResultJSON) => {
+			if (result.code != 0) {
+				toastMessage(result.msg)
+			}
+			showResult(result)
+		},
+	)
+}
+
+function onDeleteFaceFeature(): void {
+	if (!checkFaceID()) return
+
+	isProcessing.value = true
+	deleteFaceFeature(faceID.value.trim())
+	toastMessage('人脸特征已删除')
+
+	lastResult.value = {
+		code: 1,
+		msg: '人脸特征已删除：' + faceID.value.trim(),
+		faceID: faceID.value.trim(),
+		similarity: 0,
+		liveness: -1,
+		faceFeature: '',
+		faceBase64: '',
+	} as ResultJSON
+	resultVisible.value = true
+	isProcessing.value = false
+}
+</script>
+
+<style>
+.container {
+	height: 100%;
+	background-color: #f5f6fa;
+	padding-bottom: 60rpx;
+}
+
+/* ========== 头部 ========== */
+.header {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 40rpx 32rpx 32rpx;
+	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.logo {
+	width: 80rpx;
+	height: 80rpx;
+	margin-bottom: 16rpx;
+}
+
+.title {
+	font-size: 40rpx;
+	font-weight: bold;
+	color: #ffffff;
+	margin-bottom: 8rpx;
+}
+
+.subtitle {
+	font-size: 24rpx;
+	color: #BFFFFFFF;
+	/* rgba(255,255,255,0.75) → 8-digit hex for uni-app x compat */
+}
+
+/* ========== 通用区块 ========== */
+.section {
+	margin: 24rpx 24rpx 0;
+	background-color: #ffffff;
+	border-radius: 16rpx;
+	padding: 28rpx 28rpx;
+	box-shadow: 0 2rpx 12rpx #0A000000;
+	/* rgba(0,0,0,0.04) → 8-digit hex */
+}
+
+.section-title {
+	font-size: 30rpx;
+	font-weight: 600;
+	color: #2c3e50;
+	margin-bottom: 20rpx;
+}
+
+/* ========== 表单 ========== */
+.form-item {
+	margin-bottom: 24rpx;
+}
+
+.form-item.row {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.label {
+	font-size: 28rpx;
+	color: #606266;
+	margin-bottom: 10rpx;
+}
+
+.label-row {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 10rpx;
+}
+
+.label-value {
+	font-size: 26rpx;
+	color: #667eea;
+	font-weight: 600;
+}
+
+.input {
+	width: 100%;
+	height: 80rpx;
+	border: 2rpx solid #e4e7ed;
+	border-radius: 12rpx;
+	padding: 0 20rpx;
+	font-size: 28rpx;
+	color: #303133;
+	background-color: #fafafa;
+}
+
+.input:focus {
+	border-color: #667eea;
+	background-color: #ffffff;
+}
+
+.slider {
+	width: 100%;
+}
+
+.slider-range {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	margin-top: 4rpx;
+}
+
+.range-text {
+	font-size: 22rpx;
+	color: #c0c4cc;
+}
+
+/* ========== 按钮 ========== */
+.btn {
+	width: 100%;
+	height: 84rpx;
+	border-radius: 12rpx;
+	font-size: 28rpx;
+	font-weight: 500;
+	margin-bottom: 16rpx;
+	text-align: center;
+	line-height: 84rpx;
+	border-width: 0;
+}
+
+.btn:last-child {
+	margin-bottom: 0;
+}
+
+.btn-primary {
+	background-color: #667eea;
+	color: #ffffff;
+}
+
+.btn-primary:active {
+	background-color: #5a6fd6;
+}
+
+.btn-accent {
+	background-color: #e89c3a;
+	color: #ffffff;
+}
+
+.btn-accent:active {
+	background-color: #d48c2e;
+}
+
+.btn-outline {
+	background-color: #ffffff;
+	color: #667eea;
+	border: 2rpx solid #667eea;
+}
+
+.btn-outline:active {
+	background-color: #f0f2ff;
+}
+
+.btn-danger {
+	background-color: #ffffff;
+	color: #f56c6c;
+	border: 2rpx solid #f56c6c;
+}
+
+.btn-danger:active {
+	background-color: #fef0f0;
+}
+
+/* ========== 结果卡片 ========== */
+.result-header {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 0;
+}
+
+.clear-btn {
+	font-size: 26rpx;
+	color: #909399;
+}
+
+.result-card {
+	border-radius: 12rpx;
+	padding: 24rpx;
+	margin-top: 16rpx;
+	border-width: 2rpx;
+	border-style: solid;
+}
+
+.result-success {
+	background-color: #f0f9eb;
+	border-color: #c2e7b0;
+}
+
+.result-cancel {
+	background-color: #f4f4f5;
+	border-color: #d3d4d6;
+}
+
+.result-fail {
+	background-color: #fef0f0;
+	border-color: #fbc4c4;
+}
+
+.result-item {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: flex-start;
+	padding: 10rpx 0;
+	border-bottom: 1rpx solid #0A000000;
+	/* rgba(0,0,0,0.04) → 8-digit hex */
+}
+
+.result-item:last-child {
+	border-bottom-width: 0;
+}
+
+.result-label {
+	font-size: 26rpx;
+	color: #909399;
+	flex-shrink: 0;
+	margin-right: 20rpx;
+}
+
+.result-value {
+	font-size: 26rpx;
+	color: #303133;
+	font-weight: 500;
+	text-align: right;
+	flex: 1;
+}
+
+.result-value.highlight {
+	color: #67c23a;
+	font-weight: 700;
+}
+
+.result-value.danger-text {
+	color: #f56c6c;
+	font-weight: 700;
+}
+
+.feature-text {
+	font-size: 22rpx;
+	font-family: monospace;
+	color: #606266;
+}
+
+/* ========== 人脸预览 ========== */
+.face-preview {
+	margin-top: 20rpx;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+}
+
+.preview-label {
+	font-size: 24rpx;
+	color: #909399;
+	margin-bottom: 12rpx;
+}
+
+.face-image {
+	width: 240rpx;
+	height: 240rpx;
+	border-radius: 12rpx;
+	border: 2rpx solid #e4e7ed;
+	background-color: #fafafa;
+}
+
+/* ========== 底部间距 ========== */
+.bottom-spacer {
+	height: 40rpx;
+}
+</style>

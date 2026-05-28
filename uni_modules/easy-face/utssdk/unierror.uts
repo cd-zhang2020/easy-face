@@ -1,0 +1,63 @@
+/**
+ * 错误主题
+ * 插件名称作为错误来源标识
+ */
+export const UniErrorSubject = 'easy-face';
+
+/**
+ * easy-face 错误码定义
+ */
+export type EasyFaceErrorCode = 
+  | 9010000  // 用户取消操作
+  | 9010001  // 相机权限未授权
+  | 9010002  // 人脸检测失败
+  | 9010003  // 特征提取失败
+  | 9010004  // 活体检测失败
+  | 9010005  // 模型加载失败
+  | 9010006  // 图片解码失败
+  | 9010007  // 存储异常
+  | 9010008  // 未检测到人脸
+  | 9010009  // 参数校验失败
+  | 9019999; // 未知错误
+
+/**
+ * 错误码对应的信息
+ */
+export const EasyFaceErrors: Map<EasyFaceErrorCode, string> = new Map([
+  [9010000, '用户取消操作'],
+  [9010001, '相机权限未授权'],
+  [9010002, '人脸检测失败'],
+  [9010003, '人脸特征提取失败'],
+  [9010004, '静默活体检测失败'],
+  [9010005, 'AI模型加载失败'],
+  [9010006, '图片解码失败'],
+  [9010007, '数据存储异常'],
+  [9010008, '未检测到人脸'],
+  [9010009, '参数校验失败'],
+  [9019999, '未知错误'],
+]);
+
+/**
+ * easy-face 错误回调参数接口
+ */
+export interface EasyFaceFail extends IUniError {
+  errCode: EasyFaceErrorCode;
+}
+
+/**
+ * 错误对象实现
+ */
+export class EasyFaceFailImpl extends UniError implements EasyFaceFail {
+
+  override errCode: EasyFaceErrorCode;
+
+  /**
+   * 错误对象构造函数
+   */
+  constructor(errCode: EasyFaceErrorCode, extraMsg?: string) {
+    super();
+    this.errSubject = UniErrorSubject;
+    this.errCode = errCode;
+    this.errMsg = (EasyFaceErrors.get(errCode) ?? "未知错误") + (extraMsg != null ? "：" + extraMsg : "");
+  }
+}

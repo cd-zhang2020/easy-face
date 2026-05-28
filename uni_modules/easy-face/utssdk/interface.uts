@@ -1,0 +1,149 @@
+/**
+ * easy-face 插件基础参数
+ */
+export type ResultJSON = {
+  code: number,         // 状态码，含义参考状态码说明
+  msg: string,          // 消息
+  faceID: string,       // 1:1 要对比的 faceID，你的业务系统定义用户的唯一字符串
+  similarity: number,   // 相似度 (0~1)
+  liveness: number,     // 静默活体分数 (0~1，越高越像真人)
+  faceFeature: string,  // 人脸特征值 (128维浮点数组 Base64 编码)
+  faceBase64: string    // 人脸图 Base64 编码
+}
+
+/**
+ * 通过摄像头录入人脸信息
+ * 
+ * @param faceID 用户ID
+ * @param callback 结果回调
+ */
+export type AddFaceBySDKCamera = (
+  faceID: string,
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 从 Base64 图片中提取人脸特征并录入
+ * 人脸图需要正面清晰照
+ * 
+ * @param faceID 用户ID
+ * @param base64FaceImage 人脸图 Base64 编码
+ * @param callback 结果回调
+ */
+export type AddFaceBySDKImage = (
+  faceID: string,
+  base64FaceImage: string,
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 校验是否为当前用户
+ * 
+ * @param faceID 用户ID
+ * @param threshold 相似度阈值，范围 [0.5, 0.95]，默认 0.6
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type FaceVerify = (
+  faceID: string,
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 仅检测是否为真人
+ * 
+ * @param callback 结果回调
+ */
+export type LivenessVerify = (
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 检测人脸特征是否已存在
+ * 
+ * @param faceID 用户ID
+ * @param callback 结果回调
+ */
+export type GetFaceFeature = (
+  faceID: string,
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 同步人脸特征到本地 SDK
+ * 
+ * @param faceID 用户ID
+ * @param faceFeature 人脸特征值 (Base64 编码的 128 维浮点数组)
+ * @param callback 结果回调
+ */
+export type InsertFaceFeature = (
+  faceID: string,
+  faceFeature: string,
+  callback: (result: ResultJSON) => void) => void
+
+/**
+ * 删除本地人脸特征
+ * 
+ * @param faceID 用户ID
+ */
+export type DeleteFaceFeature = (faceID: string) => void
+
+/**
+ * 实时人脸验证：传入 base64 图片帧进行 1:1 对比，不保存特征
+ * 用于实时摄像头流不停对比场景
+ * 
+ * @param faceID 用户ID
+ * @param base64Image 相机帧 Base64 编码
+ * @param threshold 相似度阈值，范围 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type VerifyFaceRealtime = (
+  faceID: string,
+  base64Image: string,
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void
+) => void
+
+/**
+ * Toast 消息提示
+ */
+export type ToastMessage = (message: string) => void
+
+/**
+ * 切换摄像头
+ * 
+ * @param cameraID 0=后置 1=前置
+ */
+export type SwitchCamera = (cameraID: number) => void
+
+/**
+ * 启动原生人脸验证 Activity（全屏）
+ * 使用原生 Camera2 + 自定义 Canvas UI，体验更好
+ *
+ * @param faceID 用户ID
+ * @param threshold 相似度阈值 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type StartFaceVerifyActivity = (
+  faceID: string,
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void
+) => void
+
+/**
+ * 启动 CameraX 人脸验证 Activity（全屏）
+ * 使用 androidx.camera (CameraX) + 精美自定义 Canvas UI + 验证动画
+ * 相比 Camera2 版本：自动管理摄像头生命周期，PreviewView 预览，扫瞄线/脉冲光环/粒子爆炸动画
+ *
+ * @param faceID 用户ID
+ * @param threshold 相似度阈值 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type StartCameraXFaceVerifyActivity = (
+  faceID: string,
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void
+) => void
