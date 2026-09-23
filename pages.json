@@ -5,6 +5,15 @@
 			"style": {
 				"navigationBarTitleText": "uni-app x"
 			}
+		},
+		{
+			"path": "pages/access/index",
+			"style": {
+				"navigationBarTitleText": "门禁多对多识别",
+				"navigationBarBackgroundColor": "#0F172A",
+				"navigationBarTextStyle": "white",
+				"backgroundColor": "#0F172A"
+			}
 		}
 	],
 	"globalStyle": {

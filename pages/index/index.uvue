@@ -88,6 +88,20 @@
 			</button>
 		</view>
 
+		<!-- 门禁多对多识别入口 -->
+		<view class="section">
+			<text class="section-title">更多场景</text>
+
+			<view class="access-card" @tap="goAccess">
+				<text class="access-icon">🚪</text>
+				<view class="access-text">
+					<text class="access-title">门禁多对多识别</text>
+					<text class="access-sub">1:N 闸机核验演示 · 全体人脸检索</text>
+				</view>
+				<text class="access-arrow">›</text>
+			</view>
+		</view>
+
 		<!-- 结果展示区 -->
 		<view class="section" v-if="resultVisible">
 			<view class="result-header">
@@ -108,17 +122,17 @@
 					<text class="result-label">用户 ID</text>
 					<text class="result-value">{{lastResult.faceID}}</text>
 				</view>
-				<view class="result-item" v-if="lastResult.similarity > 0">
+				<view class="result-item" v-if="similarityText != ''">
 					<text class="result-label">相似度</text>
-					<text class="result-value highlight">{{(lastResult.similarity * 100).toFixed(2)}}%</text>
+					<text class="result-value highlight">{{similarityText}}%</text>
 				</view>
-				<view class="result-item" v-if="lastResult.liveness >= 0">
+				<view class="result-item" v-if="livenessText != ''">
 					<text class="result-label">活体分</text>
-					<text class="result-value" :class="livenessClass">{{(lastResult.liveness * 100).toFixed(2)}}%</text>
+					<text class="result-value" :class="livenessClass">{{livenessText}}%</text>
 				</view>
 				<view class="result-item" v-if="lastResult.faceFeature != ''">
 					<text class="result-label">特征值</text>
-					<text class="result-value feature-text">{{formatFeatureText(lastResult.faceFeature)}}</text>
+					<text class="result-value feature-text">{{featureText}}</text>
 				</view>
 			</view>
 
@@ -189,14 +203,29 @@ const livenessClass = computed<string>((): string => {
 	return 'danger-text'
 })
 
+// 注意：模板中不能直接对 UTS 类型的 number 字段做 >/* 运算（编译为 Number 后运算符无法解析），统一在此计算
+const similarityText = computed<string>((): string => {
+	const score = lastResult.value.similarity
+	if (score <= 0) return ''
+	return (score * 100).toFixed(2)
+})
+
+const livenessText = computed<string>((): string => {
+	const score = lastResult.value.liveness
+	if (score < 0) return ''
+	return (score * 100).toFixed(2)
+})
+
+// 同理：模板中向函数传 UTS 类型字段会编译为 Any?，与 String 参数不匹配，统一在 computed 中处理
+const featureText = computed<string>((): string => {
+	const feature = lastResult.value.faceFeature
+	if (feature.length <= 40) return feature
+	return feature.substring(0, 20) + '...' + feature.substring(feature.length - 20)
+})
+
 // ==========================================
 // 工具方法
 // ==========================================
-function formatFeatureText(feature: string): string {
-	if (feature.length <= 40) return feature
-	return feature.substring(0, 20) + '...' + feature.substring(feature.length - 20)
-}
-
 function showResult(result: ResultJSON): void {
 	lastResult.value = result
 	resultVisible.value = true
@@ -422,6 +451,18 @@ function onDeleteFaceFeature(): void {
 	resultVisible.value = true
 	isProcessing.value = false
 }
+
+// ==========================================
+// 门禁多对多入口
+// ==========================================
+function goAccess(): void {
+	uni.navigateTo({
+		url: '/pages/access/index',
+		fail: () => {
+			toastMessage('页面跳转失败，请确认 pages.json 已注册')
+		},
+	})
+}
 </script>
 
 <style>
@@ -437,7 +478,8 @@ function onDeleteFaceFeature(): void {
 	flex-direction: column;
 	align-items: center;
 	padding: 40rpx 32rpx 32rpx;
-	background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+	background-image: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+	background-color: #667eea;
 }
 
 .logo {
@@ -593,6 +635,50 @@ function onDeleteFaceFeature(): void {
 
 .btn-danger:active {
 	background-color: #fef0f0;
+}
+
+/* ========== 门禁入口卡片 ========== */
+.access-card {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	padding: 24rpx 24rpx;
+	border-radius: 14rpx;
+	background-color: #6366F1;
+	box-shadow: 0 6rpx 18rpx rgba(99, 102, 241, 0.3);
+}
+
+.access-card:active {
+	transform: scale(0.98);
+}
+
+.access-icon {
+	font-size: 40rpx;
+	margin-right: 20rpx;
+}
+
+.access-text {
+	display: flex;
+	flex-direction: column;
+	flex: 1;
+	justify-content: center;
+}
+
+.access-title {
+	font-size: 30rpx;
+	font-weight: 600;
+	color: #FFFFFF;
+	margin-bottom: 6rpx;
+}
+
+.access-sub {
+	font-size: 22rpx;
+	color: #E0E7FF;
+}
+
+.access-arrow {
+	font-size: 44rpx;
+	color: #FFFFFF;
 }
 
 /* ========== 结果卡片 ========== */

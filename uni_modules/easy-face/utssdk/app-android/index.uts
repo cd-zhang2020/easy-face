@@ -2,7 +2,8 @@ import {
 	AddFaceBySDKCamera, FaceVerify, LivenessVerify,
 	GetFaceFeature, InsertFaceFeature, AddFaceBySDKImage,
 	ToastMessage, DeleteFaceFeature, SwitchCamera, ResultJSON,
-	VerifyFaceRealtime, StartFaceVerifyActivity, StartCameraXFaceVerifyActivity
+	VerifyFaceRealtime, StartFaceVerifyActivity, StartCameraXFaceVerifyActivity,
+	FaceFeatureItem, StartFaceAccessActivity, RecognizeFaceRealtime, GetFaceCount, GetAllFaceFeatures
 } from '../interface.uts'
 
 import Activity from 'android.app.Activity'
@@ -38,6 +39,7 @@ const REQ_CODE_VERIFY = 1002
 const REQ_CODE_LIVENESS = 1003
 const REQ_CODE_FACE_VERIFY_ACT = 2001
 const REQ_CODE_CAMERAX_VERIFY = 2002
+const REQ_CODE_FACE_ACCESS = 2003
 const OP_ADD_FACE : Int = 1
 const OP_VERIFY : Int = 2
 const OP_LIVENESS : Int = 3
@@ -53,6 +55,7 @@ let cameraImageUri : string = ""
 // Activity 启动回调
 let faceVerifyActCallback : ((result : ResultJSON) => void) | null = null
 let cameraXVerifyActCallback : ((result : ResultJSON) => void) | null = null
+let faceAccessActCallback : ((result : ResultJSON) => void) | null = null
 
 // --- 工具类实例 (延迟初始化) ---
 let faceDetectorInstance : FaceDetectorHelper | null = null
@@ -231,6 +234,99 @@ class RealtimeVerifyRunnable extends Runnable {
 		} catch (e : any) {
 			console.error("EasyFace: verifyFaceRealtime error: " + e.message)
 			const res : ResultJSON = { code: 9019999, msg: "处理异常: " + e.message, faceID: this.faceID, similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+			this.callback(res)
+		}
+	}
+}
+
+/**
+ * 门禁实时 1:N 检索后台处理 Runnable
+ * 复用检测+提取+活体流程，输入为 base64 图片帧，对全部已注册特征做 1:N 检索
+ */
+class AccessRecognizeRunnable extends Runnable {
+	private base64FaceImage : string
+	private threshold : number
+	private needLiveness : boolean
+	private callback : (result : ResultJSON) => void
+
+	constructor(base64FaceImage : string, threshold : number, needLiveness : boolean, callback : (result : ResultJSON) => void) {
+		super()
+		this.base64FaceImage = base64FaceImage
+		this.threshold = threshold
+		this.needLiveness = needLiveness
+		this.callback = callback
+	}
+
+	override run() : void {
+		try {
+			ensureInit()
+			const imgBytes = Base64.decode(this.base64FaceImage, Base64.NO_WRAP)
+			const bitmap = BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size)
+			if (bitmap == null) {
+				const res : ResultJSON = { code: 9010006, msg: "图片解码失败", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			const faceMap = faceDetectorInstance!.detectBestFace(bitmap)
+			if (faceMap == null) {
+				bitmap.recycle()
+				const res : ResultJSON = { code: 5, msg: "未检测到人脸", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			const bbox = new RectF(
+				faceMap.get("left") as Float,
+				faceMap.get("top") as Float,
+				faceMap.get("right") as Float,
+				faceMap.get("bottom") as Float
+			)
+			const leftEye = new PointF(faceMap.get("leftEyeX") as Float, faceMap.get("leftEyeY") as Float)
+			const rightEye = new PointF(faceMap.get("rightEyeX") as Float, faceMap.get("rightEyeY") as Float)
+
+			const embedding = faceNetInstance!.extractEmbedding(bitmap, bbox, leftEye, rightEye)
+			if (embedding == null) {
+				bitmap.recycle()
+				const res : ResultJSON = { code: 6, msg: "人脸特征提取失败", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+				this.callback(res)
+				return
+			}
+
+			var livenessScore = -1.0
+			if (this.needLiveness) {
+				livenessScore = livenessInstance!.detectLiveness(bitmap, bbox)
+				if (livenessScore >= 0 && livenessScore < 0.65) {
+					bitmap.recycle()
+					const res : ResultJSON = { code: 11, msg: "静默活体检测未通过", faceID: "", similarity: 0, liveness: livenessScore, faceFeature: "", faceBase64: "" }
+					this.callback(res)
+					return
+				}
+			}
+
+			const match = faceRepoInstance!.recognize(embedding, this.threshold as Float)
+			bitmap.recycle()
+			const matchedID = match.faceID
+			const bestScore = match.score
+			if (matchedID == "" || bestScore < 0) {
+				const res : ResultJSON = { code: 6, msg: "库中无已注册人脸", faceID: "", similarity: 0, liveness: livenessScore, faceFeature: "", faceBase64: this.base64FaceImage }
+				this.callback(res)
+				return
+			}
+
+			const res : ResultJSON = {
+				code: bestScore >= this.threshold ? 1 : 2,
+				msg: bestScore >= this.threshold ? ("开门成功，欢迎 " + matchedID) : "未匹配到已注册人员",
+				faceID: matchedID,
+				similarity: bestScore,
+				liveness: livenessScore,
+				faceFeature: "",
+				faceBase64: this.base64FaceImage
+			}
+			this.callback(res)
+		} catch (e : any) {
+			console.error("EasyFace: recognizeFaceRealtime error: " + e.message)
+			const res : ResultJSON = { code: 9019999, msg: "处理异常: " + e.message, faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
 			this.callback(res)
 		}
 	}
@@ -580,6 +676,31 @@ UTSAndroid.onAppActivityResult((requestCode : Int, resultCode : Int, intentAct ?
 			defResult.liveness = 0
 		}
 		actCallback!(defResult)
+		return
+	}
+
+	// FaceAccessActivity (门禁 1:N) 结果处理
+	if (requestCode == (REQ_CODE_FACE_ACCESS as Int)) {
+		const actCallback = faceAccessActCallback
+		faceAccessActCallback = null
+		const defResult : ResultJSON = {
+			code: 0,
+			msg: "用户取消",
+			faceID: "",
+			similarity: 0,
+			liveness: 0,
+			faceFeature: "",
+			faceBase64: ""
+		}
+		if (resultCode == -1 && intentAct != null) {
+			defResult.code = intentAct.getIntExtra("code", 0) as number
+			defResult.msg = intentAct.getStringExtra("msg") ?? "未知"
+			defResult.faceID = intentAct.getStringExtra("faceID") ?? ""
+			defResult.similarity = intentAct.getDoubleExtra("similarity", 0.0) as number
+		}
+		if (actCallback != null) {
+			actCallback(defResult)
+		}
 		return
 	}
 
@@ -1013,4 +1134,94 @@ export const startCameraXFaceVerifyActivity : StartCameraXFaceVerifyActivity = f
 	intent.putExtra("threshold", threshold)
 	intent.putExtra("needLiveness", needLiveness)
 	activity.startActivityForResult(intent, REQ_CODE_CAMERAX_VERIFY as Int)
+}
+
+/**
+ * 获取已录入人脸总数（门禁人数提示与空库校验）
+ */
+export const getFaceCount : GetFaceCount = function () : number {
+	ensureInit()
+	try {
+		return faceRepoInstance!.getRegisteredCount()
+	} catch (e : any) {
+		console.error("EasyFace: getFaceCount error: " + e.message)
+		return 0
+	}
+}
+
+/**
+ * 返回所有已录入人脸特征列表（门禁 1:N 全量导出）
+ */
+export const getAllFaceFeatures : GetAllFaceFeatures = function () : Array<FaceFeatureItem> {
+	ensureInit()
+	try {
+		const entries = faceRepoInstance!.getAllFeatureEntries()
+		const list : Array<FaceFeatureItem> = []
+		const size = entries.size
+		for (let i: Int = 0; i < size; i++) {
+			const entry = entries[i]
+			if (entry != null) {
+				list.push({ faceID: entry.faceID, faceFeature: entry.feature })
+			}
+		}
+		return list
+	} catch (e : any) {
+		console.error("EasyFace: getAllFaceFeatures error: " + e.message)
+		return []
+	}
+}
+
+/**
+ * 实时 1:N 检索：传入 base64 图片帧与本地库逐一比对余弦相似度，返回最佳匹配
+ */
+export const recognizeFaceRealtime : RecognizeFaceRealtime = function (
+	base64Image : string,
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	if (base64Image == null || base64Image.length == 0) {
+		const res : ResultJSON = { code: 9010009, msg: "base64Image 不能为空", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+	const bgThread = new Thread(new AccessRecognizeRunnable(base64Image, threshold, needLiveness, callback))
+	bgThread.start()
+}
+
+/**
+ * 启动门禁多对多识别 Activity（1:N 闸机核验）
+ */
+export const startFaceAccessActivity : StartFaceAccessActivity = function (
+	threshold : number,
+	needLiveness : boolean,
+	callback : (result : ResultJSON) => void
+) {
+	ensureInit()
+	if (threshold < 0.5 || threshold > 0.95) {
+		const res : ResultJSON = { code: 9010009, msg: "threshold 阈值需在 [0.5, 0.95] 范围内", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		return
+	}
+
+	faceAccessActCallback = callback
+
+	const activity = UTSAndroid.getUniActivity()
+	if (activity == null) {
+		const res : ResultJSON = { code: 9010001, msg: "无法获取 Activity", faceID: "", similarity: 0, liveness: 0, faceFeature: "", faceBase64: "" }
+		callback(res)
+		faceAccessActCallback = null
+		return
+	}
+
+	const intent = new Intent()
+	intent.setClassName(activity, "uts.sdk.modules.easyFace.face.FaceAccessActivity")
+	intent.putExtra("threshold", threshold)
+	intent.putExtra("needLiveness", needLiveness)
+	activity.startActivityForResult(intent, REQ_CODE_FACE_ACCESS as Int)
 }

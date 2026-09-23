@@ -1,0 +1,557 @@
+<template>
+	<scroll-view class="container" scroll-y="true">
+		<!-- 头部 -->
+		<view class="header">
+			<view class="header-badge">ACCESS</view>
+			<text class="title">智能门禁 · 多对多人脸核验</text>
+			<text class="subtitle">离线 1:N 闸机识别 · 毫秒级检索</text>
+		</view>
+
+		<!-- 已录入人数提示 -->
+		<view class="count-chip" :class="faceCount > 0 ? 'count-ok' : 'count-empty'">
+			<text class="count-dot"></text>
+			<text class="count-text" v-if="faceCount > 0">已录入 {{faceCount}} 人 · 可立即核验</text>
+			<text class="count-text" v-else>暂无录入人脸 · 请先去录入</text>
+		</view>
+
+		<!-- 基础配置 -->
+		<view class="section glass">
+			<text class="section-title">核验参数</text>
+
+			<view class="form-item">
+				<view class="label-row">
+					<text class="label">相似度阈值</text>
+					<text class="label-value">{{threshold.toFixed(2)}}</text>
+				</view>
+				<slider
+					class="slider"
+					:value="threshold"
+					@change="onThresholdChange"
+					:min="0.5"
+					:max="0.95"
+					:step="0.01"
+				/>
+				<view class="slider-range">
+					<text class="range-text">0.50</text>
+					<text class="range-text">0.95</text>
+				</view>
+			</view>
+
+			<view class="form-item row">
+				<text class="label">启用静默活体检测</text>
+				<switch :checked="needLiveness" @change="onLivenessChange" />
+			</view>
+		</view>
+
+		<!-- 启动按钮 -->
+		<view class="section">
+			<view class="btn-launch" :class="isProcessing ? 'btn-launch-disabled' : ''" @tap="onStartAccess">
+				<text class="launch-text">{{isProcessing ? '核验中...' : '启动门禁识别'}}</text>
+			</view>
+			<text class="launch-hint">点击后摄像头将持续对所有已录入人脸做 1:N 检索</text>
+		</view>
+
+		<!-- 结果展示 -->
+		<view class="section" v-if="resultVisible">
+			<text class="section-title">核验结果</text>
+			<view class="result-card" :class="resultCardClass">
+				<view class="result-glow"></view>
+				<view class="result-badge">{{resultBadge}}</view>
+				<text class="result-title">{{resultTitle}}</text>
+
+				<view class="result-item" v-if="lastResult.faceID != ''">
+					<text class="result-label">匹配用户</text>
+					<text class="result-value">{{lastResult.faceID}}</text>
+				</view>
+				<view class="result-item" v-if="similarityText != ''">
+					<text class="result-label">最佳相似度</text>
+					<text class="result-value highlight">{{similarityText}}%</text>
+				</view>
+				<view class="result-item">
+					<text class="result-label">状态码</text>
+					<text class="result-value">{{lastResult.code}}</text>
+				</view>
+				<view class="result-item">
+					<text class="result-label">描述</text>
+					<text class="result-value">{{lastResult.msg}}</text>
+				</view>
+			</view>
+
+			<button class="btn-clear" @tap="clearResult">清除结果</button>
+		</view>
+
+		<!-- 底部：前往录入 -->
+		<view class="footer">
+			<text class="footer-link" @tap="goEnroll">前往录入人脸 ›</text>
+		</view>
+
+		<view class="bottom-spacer"></view>
+	</scroll-view>
+</template>
+
+<script setup lang="uts">
+import {
+	startFaceAccessActivity,
+	getFaceCount,
+	toastMessage,
+	ResultJSON,
+} from '@/uni_modules/easy-face'
+
+// ==========================================
+// 响应式状态
+// ==========================================
+const threshold = ref<number>(0.60)
+const needLiveness = ref<boolean>(true)
+const faceCount = ref<number>(0)
+const resultVisible = ref<boolean>(false)
+const isProcessing = ref<boolean>(false)
+
+const lastResult = ref<ResultJSON>({
+	code: 0,
+	msg: '',
+	faceID: '',
+	similarity: 0,
+	liveness: -1,
+	faceFeature: '',
+	faceBase64: '',
+})
+
+// ==========================================
+// 计算属性
+// ==========================================
+const resultCardClass = computed<string>((): string => {
+	const code = lastResult.value.code
+	if (code == 1) return 'result-granted'
+	if (code == 2 || code == 6) return 'result-denied'
+	return 'result-idle'
+})
+
+const resultBadge = computed<string>((): string => {
+	const code = lastResult.value.code
+	if (code == 1) return '✓'
+	if (code == 2 || code == 6) return '✕'
+	return '•'
+})
+
+const resultTitle = computed<string>((): string => {
+	const code = lastResult.value.code
+	if (code == 1) return '开门成功'
+	if (code == 2) return '未匹配到已注册人员'
+	if (code == 6) return '请先录入人脸特征'
+	return '等待核验'
+})
+
+// 注意：模板中不能直接对 UTS 类型的 number 字段做 >/* 运算（编译为 Number 后运算符无法解析），统一在此计算
+const similarityText = computed<string>((): string => {
+	const score = lastResult.value.similarity
+	if (score <= 0) return ''
+	return (score * 100).toFixed(2)
+})
+
+// ==========================================
+// 生命周期
+// ==========================================
+onLoad(() => {
+	faceCount.value = getFaceCount()
+})
+
+// ==========================================
+// 工具方法
+// ==========================================
+function onThresholdChange(e : SliderChangeEvent): void {
+	threshold.value = (e.detail.value as number)
+}
+
+function onLivenessChange(e : SwitchChangeEvent): void {
+	needLiveness.value = (e.detail.value as boolean)
+}
+
+function showResult(result: ResultJSON): void {
+	lastResult.value = result
+	resultVisible.value = true
+	isProcessing.value = false
+}
+
+function clearResult(): void {
+	lastResult.value = {
+		code: 0,
+		msg: '',
+		faceID: '',
+		similarity: 0,
+		liveness: -1,
+		faceFeature: '',
+		faceBase64: '',
+	} as ResultJSON
+	resultVisible.value = false
+}
+
+// ==========================================
+// 门禁启动
+// ==========================================
+function onStartAccess(): void {
+	if (isProcessing.value) return
+
+	if (faceCount.value == 0) {
+		toastMessage('请先录入人脸特征')
+		return
+	}
+
+	isProcessing.value = true
+	toastMessage('正在启动门禁识别...')
+
+	startFaceAccessActivity(
+		threshold.value,
+		needLiveness.value,
+		(result: ResultJSON) => {
+			if (result.code != 0) {
+				toastMessage(result.msg)
+			}
+			showResult(result)
+			// 回写最新人数（可能期间录入/删除）
+			faceCount.value = getFaceCount()
+		},
+	)
+}
+
+function goEnroll(): void {
+	// 返回首页去录入人脸
+	uni.navigateBack({
+		fail: () => {
+			uni.reLaunch({ url: '/pages/index/index' })
+		}
+	})
+}
+</script>
+
+<style>
+.container {
+	height: 100%;
+	background-color: #f5f6fa;
+	padding-bottom: 60rpx;
+}
+
+/* ========== 头部 ========== */
+.header {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 48rpx 32rpx 28rpx;
+	background-color: #667eea;
+}
+
+.header-badge {
+	font-size: 22rpx;
+	letter-spacing: 6rpx;
+	color: #FFFFFF;
+	border: 2rpx solid rgba(255, 255, 255, 0.45);
+	border-radius: 999rpx;
+	padding: 4rpx 18rpx;
+	margin-bottom: 18rpx;
+	background-color: rgba(255, 255, 255, 0.15);
+}
+
+.title {
+	font-size: 38rpx;
+	font-weight: 700;
+	color: #FFFFFF;
+	text-align: center;
+	margin-bottom: 10rpx;
+}
+
+.subtitle {
+	font-size: 24rpx;
+	color: #E0E7FF;
+}
+
+/* ========== 人数 Chip ========== */
+.count-chip {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	margin: 24rpx 24rpx 8rpx;
+	padding: 18rpx 24rpx;
+	border-radius: 16rpx;
+	background-color: #FFFFFF;
+	border: 2rpx solid rgba(0, 0, 0, 0.06);
+	box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.04);
+}
+
+.count-ok {
+	border-color: rgba(16, 185, 129, 0.35);
+	background-color: #ECFDF5;
+}
+
+.count-empty {
+	border-color: rgba(239, 68, 68, 0.35);
+	background-color: #FEF2F2;
+}
+
+.count-dot {
+	width: 14rpx;
+	height: 14rpx;
+	border-radius: 999rpx;
+	margin-right: 14rpx;
+}
+
+.count-ok .count-dot {
+	background-color: #10B981;
+}
+
+.count-empty .count-dot {
+	background-color: #EF4444;
+}
+
+.count-text {
+	font-size: 26rpx;
+	color: #334155;
+}
+
+.count-empty .count-text {
+	color: #DC2626;
+}
+
+/* ========== 卡片 ========== */
+.section {
+	margin: 24rpx 24rpx 0;
+	background-color: #FFFFFF;
+	border-radius: 16rpx;
+	padding: 28rpx 28rpx;
+	box-shadow: 0 2rpx 12rpx rgba(0, 0, 0, 0.04);
+}
+
+.glass {
+	background-color: #F5F7FF;
+	border: 2rpx solid #E0E7FF;
+}
+
+.section-title {
+	font-size: 30rpx;
+	font-weight: 600;
+	color: #2c3e50;
+	margin-bottom: 20rpx;
+}
+
+/* ========== 表单 ========== */
+.form-item {
+	margin-bottom: 24rpx;
+}
+
+.form-item.row {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.label {
+	font-size: 28rpx;
+	color: #606266;
+	margin-bottom: 10rpx;
+}
+
+.label-row {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: center;
+	margin-bottom: 10rpx;
+}
+
+.label-value {
+	font-size: 26rpx;
+	color: #6366F1;
+	font-weight: 600;
+}
+
+.slider {
+	width: 100%;
+}
+
+.slider-range {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	margin-top: 4rpx;
+}
+
+.range-text {
+	font-size: 22rpx;
+	color: #909399;
+}
+
+/* ========== 启动按钮 ========== */
+.btn-launch {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	height: 92rpx;
+	border-radius: 16rpx;
+	background-color: #6366F1;
+	box-shadow: 0 8rpx 24rpx rgba(99, 102, 241, 0.4);
+}
+
+.btn-launch:active {
+	transform: translateY(4rpx);
+	box-shadow: 0 4rpx 12rpx rgba(99, 102, 241, 0.35);
+}
+
+.btn-launch-disabled {
+	opacity: 0.6;
+}
+
+.launch-text {
+	font-size: 30rpx;
+	font-weight: 600;
+	color: #FFFFFF;
+}
+
+.launch-hint {
+	font-size: 22rpx;
+	color: #909399;
+	text-align: center;
+	margin-top: 14rpx;
+}
+
+/* ========== 结果卡片 ========== */
+.result-card {
+	position: relative;
+	border-radius: 18rpx;
+	padding: 32rpx 28rpx;
+	margin-top: 8rpx;
+	border-width: 2rpx;
+	border-style: solid;
+	overflow: hidden;
+}
+
+.result-glow {
+	position: absolute;
+	top: -40rpx;
+	right: -40rpx;
+	width: 180rpx;
+	height: 180rpx;
+	border-radius: 999rpx;
+}
+
+.result-granted {
+	background-color: #ECFDF5;
+	border-color: #6EE7B7;
+}
+
+.result-granted .result-glow {
+	background-color: rgba(16, 185, 129, 0.25);
+}
+
+.result-denied {
+	background-color: #FEF2F2;
+	border-color: #FCA5A5;
+}
+
+.result-denied .result-glow {
+	background-color: rgba(239, 68, 68, 0.2);
+}
+
+.result-idle {
+	background-color: #F8FAFC;
+	border-color: #E2E8F0;
+}
+
+.result-badge {
+	font-size: 56rpx;
+	font-weight: 700;
+	text-align: center;
+	margin-bottom: 8rpx;
+}
+
+.result-granted .result-badge {
+	color: #10B981;
+}
+
+.result-denied .result-badge {
+	color: #EF4444;
+}
+
+.result-idle .result-badge {
+	color: #6B7280;
+}
+
+.result-title {
+	font-size: 34rpx;
+	font-weight: 700;
+	text-align: center;
+	color: #1F2937;
+	margin-bottom: 20rpx;
+}
+
+.result-item {
+	display: flex;
+	flex-direction: row;
+	justify-content: space-between;
+	align-items: flex-start;
+	padding: 12rpx 0;
+	border-bottom: 2rpx solid rgba(0, 0, 0, 0.06);
+}
+
+.result-item:last-child {
+	border-bottom-width: 0;
+}
+
+.result-label {
+	font-size: 26rpx;
+	color: #6B7280;
+	flex-shrink: 0;
+	margin-right: 20rpx;
+}
+
+.result-value {
+	font-size: 26rpx;
+	color: #1F2937;
+	font-weight: 500;
+	text-align: right;
+	flex: 1;
+}
+
+.result-value.highlight {
+	color: #10B981;
+	font-weight: 700;
+}
+
+.btn-clear {
+	width: 100%;
+	height: 76rpx;
+	margin-top: 20rpx;
+	border-radius: 12rpx;
+	background-color: transparent;
+	border: 2rpx solid rgba(0, 0, 0, 0.1);
+	color: #606266;
+	font-size: 26rpx;
+}
+
+.btn-clear:active {
+	background-color: rgba(0, 0, 0, 0.04);
+}
+
+/* ========== 底部 ========== */
+.footer {
+	display: flex;
+	flex-direction: row;
+	justify-content: center;
+	margin-top: 32rpx;
+}
+
+.footer-link {
+	font-size: 28rpx;
+	color: #6366F1;
+	font-weight: 500;
+}
+
+.footer-link:active {
+	opacity: 0.7;
+}
+
+.bottom-spacer {
+	height: 40rpx;
+}
+</style>

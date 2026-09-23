@@ -147,3 +147,55 @@ export type StartCameraXFaceVerifyActivity = (
   needLiveness: boolean,
   callback: (result: ResultJSON) => void
 ) => void
+
+/**
+ * 单条已注册人脸特征（getAllFaceFeatures 列表项）
+ */
+export type FaceFeatureItem = {
+  faceID: string,       // 用户ID
+  faceFeature: string   // 人脸特征值 (128维浮点数组 Base64 编码)
+}
+
+/**
+ * 启动门禁多对多识别 Activity（1:N 闸机核验）
+ * 摄像头持续对全部已录入人脸做实时 1:N 检索，返回最佳匹配
+ *
+ * @param threshold 相似度阈值 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type StartFaceAccessActivity = (
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void
+) => void
+
+/**
+ * 实时 1:N 检索：传入 base64 图片帧与本地库逐一比对余弦相似度，返回最佳匹配
+ * 用于门禁实时摄像头流不停检索场景
+ *
+ * @param base64Image 相机帧 Base64 编码
+ * @param threshold 相似度阈值，范围 [0.5, 0.95]
+ * @param needLiveness 是否需要静默活体检测
+ * @param callback 结果回调
+ */
+export type RecognizeFaceRealtime = (
+  base64Image: string,
+  threshold: number,
+  needLiveness: boolean,
+  callback: (result: ResultJSON) => void
+) => void
+
+/**
+ * 获取已录入人脸总数（门禁人数提示与空库校验）
+ * @return 已注册人数
+ */
+export type GetFaceCount = () => number
+
+/**
+ * 返回所有已录入的人脸特征列表（门禁 1:N 全量导出）
+ * 用于前端查看/同步/校验已注册库，不做检索
+ *
+ * @return 已注册人脸特征数组（按录入顺序）
+ */
+export type GetAllFaceFeatures = () => Array<FaceFeatureItem>

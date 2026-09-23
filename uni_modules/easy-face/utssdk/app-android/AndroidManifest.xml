@@ -20,6 +20,11 @@
 			android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" android:screenOrientation="portrait"
 			android:configChanges="orientation|screenSize" />
 
+		<!-- 门禁 1:N 多对多人脸识别 Activity -->
+		<activity android:name="uts.sdk.modules.easyFace.face.FaceAccessActivity"
+			android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen" android:screenOrientation="portrait"
+			android:configChanges="orientation|screenSize" />
+
 		<!-- MMKV 初始化 ContentProvider -->
 		<provider android:name="com.tencent.mmkv.MMKVContentProvider"
 			android:authorities="${applicationId}.mmkv.easyFace" android:exported="false" android:initOrder="99" />
